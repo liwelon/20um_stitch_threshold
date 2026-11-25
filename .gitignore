@@ -1,0 +1,18 @@
+/dist/
+/build/
+/packaging/_config_backup/
+/.idea
+/docs/
+__pycache__/
+*.py[cod]
+
+# Local data, training outputs, and private configuration
+/classifier_runs/
+/segment_runs/
+/image_review_stage/
+/core_source/
+/dist.zip
+/image3.png
+/image3.json
+.env
+.env.*

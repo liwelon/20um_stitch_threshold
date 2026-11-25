@@ -1,0 +1,50 @@
+{
+    "1#20um": {
+        "hDx": 4152,
+        "hDy": -11,
+        "vDx": 9,
+        "vDy": 3726,
+        "rows": 2,
+        "cols": 2,
+        "layers": 2,
+        "singleW": 4512,
+        "singleH": 4096,
+        "channel": 3
+    },
+    "2#20um": {
+        "hDx": 4139,
+        "hDy": -11,
+        "vDx": 9,
+        "vDy": 3719,
+        "rows": 2,
+        "cols": 2,
+        "layers": 2,
+        "singleW": 4512,
+        "singleH": 4096,
+        "channel": 3
+    },
+    "3#20um": {
+        "hDx": 4159,
+        "hDy": -6,
+        "vDx": 7,
+        "vDy": 3738,
+        "rows": 2,
+        "cols": 2,
+        "layers": 2,
+        "singleW": 4512,
+        "singleH": 4096,
+        "channel": 3
+    },
+    "4#20um": {
+        "hDx": 4125,
+        "hDy": -3,
+        "vDx": 3,
+        "vDy": 3709,
+        "rows": 2,
+        "cols": 2,
+        "layers": 2,
+        "singleW": 4512,
+        "singleH": 4096,
+        "channel": 3
+    }
+}

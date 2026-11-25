@@ -1,0 +1,20 @@
+{
+    "uv1": {
+        "pad_w": 66,
+        "pad_h": 66,
+        "pad_range": 10,
+        "pad_search_range": 200,
+        "pad_min_num": 6,
+        "pad_top_to_cmos_edge_pix": 190,
+        "pad_gray_thresh": 80
+    },
+    "612v4s8": {
+        "pad_w": 66,
+        "pad_h": 66,
+        "pad_range": 10,
+        "pad_search_range": 200,
+        "pad_min_num": 6,
+        "pad_top_to_cmos_edge_pix": 190,
+        "pad_gray_thresh": 151
+    }
+}
