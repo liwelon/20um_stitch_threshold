@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,7 +20,7 @@ DEFAULT_DATABASE_CONFIG = DatabaseConfig(
     port=3306,
     database="szx",
     username="root",
-    password=os.environ.get("WAFER_DB_PASSWORD", ""),
+    password="root",
 )
 
 

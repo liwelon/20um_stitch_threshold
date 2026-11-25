@@ -17,17 +17,6 @@
 python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-## 数据库密码配置
-
-数据库密码从 `WAFER_DB_PASSWORD` 环境变量读取，未设置时为空。连接 MySQL 前，在 PowerShell 中输入密码，然后从同一窗口启动程序：
-
-```powershell
-$env:WAFER_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'MySQL 密码' -AsSecureString)).Password
-python main.py
-```
-
-该变量只在当前 PowerShell 会话及其启动的程序中生效。使用打包程序时，也需从设置了该变量的窗口启动。不要将密码写入源码或提交到 Git。
-
 ## 5um 模型转换为 TensorRT Engine
 
 在 `circuit.onnx` 所在目录执行以下命令，`trtexec` 需已加入 `PATH`。命令将动态 batch 固定为本项目使用的 batch 1；同名 Engine 会被覆盖。
