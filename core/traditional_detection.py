@@ -1823,6 +1823,7 @@ def _run_20um(
         )
     items = cap_items + cmos_items
     regions = cap_regions + cmos_regions
+    source_image = combined.copy()
     if cmos_top_line is not None and 0 <= cmos_top_line < combined.shape[0]:
         cv2.line(
             combined,
@@ -1846,6 +1847,7 @@ def _run_20um(
         items,
         regions,
         messages,
+        source_image=source_image,
     )
 
 
@@ -1879,5 +1881,6 @@ def run_traditional_detection(
         )
     else:
         raise ValueError(f"不支持的分辨率：{resolution_mode}")
-    output.source_image = image
+    if output.source_image is None:
+        output.source_image = image
     return output

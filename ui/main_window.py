@@ -33,7 +33,10 @@ from core.traditional_detection import (
     AutoCropOutput,
     DEFAULT_BLIND_CIRCUIT_MODEL_PATH,
     DetectionOutput,
+    _calc_ratio_mean,
+    _clamp,
     _rect,
+    _section,
 )
 from core.wafer_recipe_db import (
     DEFAULT_DATABASE_CONFIG,
@@ -783,6 +786,7 @@ class MainWindow(QMainWindow):
         self.vertical_offset_label = QLabel("垂直偏移：尚未选择裁剪区域")
         self.roi_size_label.setStyleSheet("color: #475569; font-weight: 600;")
         self.measurement_label.setStyleSheet("color: #c2410c; font-weight: 600;")
+        self.measurement_label.setWordWrap(True)
         self.roi_position_label.setStyleSheet("color: #475569; font-weight: 600;")
         self.horizontal_offset_label.setStyleSheet("color: #475569; font-weight: 600;")
         self.vertical_offset_label.setStyleSheet("color: #475569; font-weight: 600;")
@@ -1584,6 +1588,20 @@ class MainWindow(QMainWindow):
                 table.item(0, 0).setText(text)
                 table.blockSignals(False)
         self._append_log(f"本地参数已修改：{'.'.join(path)} = {text}")
+        if (
+            self._display_mode == "detection"
+            and path in {
+                ("detectParams", "darkSearchRatio"),
+                ("DetectParams", "darkSearchRatio"),
+            }
+        ):
+            rect = self.original_view.measurement_rect()
+            if rect is not None:
+                self._on_measurement_changed(
+                    self.original_view,
+                    int(round(rect.x())), int(round(rect.y())),
+                    int(round(rect.width())), int(round(rect.height())),
+                )
 
     def _model_parameter_path(self) -> tuple[str, ...] | None:
         params = self._runtime_recipe_params
@@ -2631,6 +2649,8 @@ class MainWindow(QMainWindow):
         self._detection_output = None
         self.mode_detection_btn.setEnabled(False)
         self._update_detection_navigation_buttons()
+        if self._display_mode == "detection":
+            self.set_display_mode("original", force=True)
 
     def _update_detection_navigation_buttons(self) -> None:
         if self._detection_outputs:
@@ -2681,7 +2701,7 @@ class MainWindow(QMainWindow):
             self.image_view.set_draw_mode(False)
         self._measure_mode = enabled
         self.original_view.set_measure_mode(
-            enabled and self._display_mode in {"original", "parallel", "crop"}
+            enabled and self._display_mode in {"original", "parallel", "crop", "detection"}
         )
         self.image_view.set_measure_mode(
             enabled and self._display_mode in {"binary", "parallel"}
@@ -3242,6 +3262,7 @@ class MainWindow(QMainWindow):
         self.batch_configured_region_crop_button.setVisible(target_mode == "5um")
         self.recipe_region_group.setVisible(target_mode == "5um")
         self._clear_stitch_results()
+        self._clear_detection_outputs()
         self.stitch_layer_widget.setVisible(target_mode == "20um")
         self._first_pad = None
         self._pad_rects = []
@@ -3375,7 +3396,6 @@ class MainWindow(QMainWindow):
         self._stitch_layer = "down"
         self._down_image = None
         self._up_image = None
-        self._clear_detection_outputs()
         self._ignored_image_count = 0
         self.stitch_preview_combo.clear()
         self.stitch_preview_combo.setEnabled(False)
@@ -3587,13 +3607,12 @@ class MainWindow(QMainWindow):
             self._crop_folder_index = -1
         self._source_image = image
         self._auto_crop_output = None
-        self._clear_detection_outputs()
         self._first_pad = None
         self._pad_rects = []
         self._roi_rect = None
         self._crop_image = None
         self._crop_gray = None
-        if self._display_mode == "crop":
+        if self._display_mode in {"crop", "detection"}:
             self._display_mode = "original"
             self._sync_display_mode_buttons("original")
         if source_label and not source_label.startswith("拼接"):
@@ -3736,6 +3755,9 @@ class MainWindow(QMainWindow):
 
         previous = self._display_mode
         if mode == "detection":
+            if not force and 0 <= self._detection_output_index < len(self._detection_outputs):
+                self._show_detection_output_at(self._detection_output_index)
+                return
             if self._detection_output is None:
                 self._sync_display_mode_buttons(previous)
                 return
@@ -3863,9 +3885,38 @@ class MainWindow(QMainWindow):
         if width <= 0 or height <= 0:
             self.measurement_label.setText("测量框宽高：尚未选择测量区域")
         else:
-            self.measurement_label.setText(
+            text = (
                 f"测量框宽高：{width} × {height} 像素，面积：{width * height} 像素²"
             )
+            if self._display_mode == "detection":
+                output = self._detection_output
+                source_image = None if output is None else output.source_image
+                depth_text = "无可用原图"
+                if source_image is not None and source_image.size:
+                    detection = _section(
+                        self._runtime_recipe_params or {}, "detectParams", "DetectParams"
+                    )
+                    try:
+                        ratio = float(detection.get("darkSearchRatio", 0.1))
+                    except (TypeError, ValueError):
+                        ratio = 0.0
+                    depth_text = "搜索比例无效"
+                    if 0.0 < ratio <= 1.0:
+                        rx, ry, rw, rh = _clamp(
+                            (x, y, width, height), source_image.shape
+                        )
+                        roi = source_image[ry:ry + rh, rx:rx + rw]
+                        darkness = None
+                        if roi.size:
+                            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+                            darkness = _calc_ratio_mean(gray, (0, 0, rw, rh), ratio)
+                        depth_text = (
+                            f"{darkness:.2f}（搜索比例 {ratio:g}）"
+                            if darkness is not None
+                            else "取样像素不足"
+                        )
+                text += f"\n框内深浅度：{depth_text}"
+            self.measurement_label.setText(text)
         if self._display_mode != "parallel" or self._syncing_measurement:
             return
         target = self.image_view if source is self.original_view else self.original_view
