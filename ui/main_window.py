@@ -1589,7 +1589,7 @@ class MainWindow(QMainWindow):
                 table.blockSignals(False)
         self._append_log(f"本地参数已修改：{'.'.join(path)} = {text}")
         if (
-            self._display_mode == "detection"
+            self._display_mode in {"original", "detection"}
             and path in {
                 ("detectParams", "darkSearchRatio"),
                 ("DetectParams", "darkSearchRatio"),
@@ -3888,9 +3888,12 @@ class MainWindow(QMainWindow):
             text = (
                 f"测量框宽高：{width} × {height} 像素，面积：{width * height} 像素²"
             )
-            if self._display_mode == "detection":
-                output = self._detection_output
-                source_image = None if output is None else output.source_image
+            if self._display_mode in {"original", "detection"}:
+                if self._display_mode == "original":
+                    source_image = self._original_image
+                else:
+                    output = self._detection_output
+                    source_image = None if output is None else output.source_image
                 depth_text = "无可用原图"
                 if source_image is not None and source_image.size:
                     detection = _section(
