@@ -119,6 +119,7 @@ class MainWindow(QMainWindow):
         saved_mode = self._settings.value("last_resolution_mode", "20um", type=str)
         self._resolution_mode = saved_mode if saved_mode in {"20um", "5um"} else "20um"
         self._display_mode = "original"
+        self._debug_stage = "cap_union"
         self._syncing_views = False
         self._first_pad: tuple[int, int, int, int] | None = None
         self._pad_rects: list[tuple[int, int, int, int]] = []
@@ -322,13 +323,26 @@ class MainWindow(QMainWindow):
         self.debug_stage_widget = QWidget()
         debug_stage_row = QHBoxLayout(self.debug_stage_widget)
         debug_stage_row.setContentsMargins(0, 0, 0, 0)
+        debug_stage_row.setSpacing(8)
         debug_stage_row.addWidget(QLabel("CAP 调试阶段"))
-        self.debug_stage_combo = QComboBox()
-        self.debug_stage_combo.addItem("二值化与边缘并集", "cap_union")
-        self.debug_stage_combo.addItem("闭运算后", "cap_closed")
-        self.debug_stage_combo.setEnabled(False)
-        self.debug_stage_combo.currentIndexChanged.connect(self._on_debug_stage_changed)
-        debug_stage_row.addWidget(self.debug_stage_combo)
+        self.debug_union_btn = QPushButton("二值化与边缘并集")
+        self.debug_closed_btn = QPushButton("闭运算后")
+        self.debug_parallel_btn = QPushButton("并排")
+        self.debug_stage_group = QButtonGroup(self)
+        self.debug_stage_group.setExclusive(True)
+        for button, stage in (
+            (self.debug_union_btn, "cap_union"),
+            (self.debug_closed_btn, "cap_closed"),
+            (self.debug_parallel_btn, "parallel"),
+        ):
+            button.setCheckable(True)
+            self.debug_stage_group.addButton(button)
+            debug_stage_row.addWidget(button)
+            button.clicked.connect(
+                lambda _checked=False, s=stage: self._on_debug_stage_changed(s)
+            )
+        self.debug_union_btn.setChecked(True)
+        self.debug_stage_widget.setEnabled(False)
         debug_stage_row.addStretch()
         self.debug_stage_widget.setVisible(False)
         image_panel_layout.addWidget(self.debug_stage_widget)
@@ -2676,7 +2690,7 @@ class MainWindow(QMainWindow):
         self.mode_detection_btn.setEnabled(True)
         has_debug = self._resolution_mode == "20um" and bool(output.debug_images)
         self.mode_debug_btn.setEnabled(has_debug)
-        self.debug_stage_combo.setEnabled(has_debug)
+        self.debug_stage_widget.setEnabled(has_debug)
         self._update_detection_navigation_buttons()
         if activate or showing_detection:
             if target_mode == "debug" and not has_debug:
@@ -2696,7 +2710,7 @@ class MainWindow(QMainWindow):
         self._detection_output = None
         self.mode_detection_btn.setEnabled(False)
         self.mode_debug_btn.setEnabled(False)
-        self.debug_stage_combo.setEnabled(False)
+        self.debug_stage_widget.setEnabled(False)
         self._update_detection_navigation_buttons()
         if self._display_mode in {"detection", "debug"}:
             self.set_display_mode("original", force=True)
@@ -3780,6 +3794,8 @@ class MainWindow(QMainWindow):
     def update_binary_image(self) -> None:
         if self._gray_image is None:
             return
+        if self._display_mode == "debug" and self._debug_stage == "parallel":
+            return
         threshold = self.threshold_slider.value()
         _, binary_data = cv2.threshold(
             self._gray_image,
@@ -3802,7 +3818,8 @@ class MainWindow(QMainWindow):
         gray_mean = float(np.mean(gray_image))
         self.gray_mean_label.setText(f"灰度均值：{gray_mean:.2f}")
 
-    def _on_debug_stage_changed(self, _index: int) -> None:
+    def _on_debug_stage_changed(self, stage: str) -> None:
+        self._debug_stage = stage
         if self._display_mode == "debug":
             self.set_display_mode("debug", force=True)
 
@@ -3821,18 +3838,29 @@ class MainWindow(QMainWindow):
                 self._sync_display_mode_buttons(previous)
                 return
             display_image = self._detection_output.image
+            parallel_image = None
             if mode == "debug":
-                display_image = self._detection_output.debug_images.get(self.debug_stage_combo.currentData())
-                if self._resolution_mode != "20um" or display_image is None:
+                debug_parallel = self._debug_stage == "parallel"
+                stage = "cap_union" if debug_parallel else self._debug_stage
+                display_image = self._detection_output.debug_images.get(stage)
+                if debug_parallel:
+                    parallel_image = self._detection_output.debug_images.get("cap_closed")
+                if (
+                    self._resolution_mode != "20um"
+                    or display_image is None
+                    or (debug_parallel and parallel_image is None)
+                ):
                     self._sync_display_mode_buttons(previous)
                     self._set_status("当前检测结果没有 CAP 调试图")
                     return
             self._display_mode = mode
             self._update_recipe_overlay()
             self.original_view.setVisible(True)
-            self.image_view.setVisible(False)
+            self.image_view.setVisible(parallel_image is not None)
             self.original_view.set_roi_interactive(False)
+            self.image_view.set_roi_interactive(False)
             self.original_view.set_draw_mode(False)
+            self.image_view.set_draw_mode(False)
             keep_view = previous == "debug" and mode == "debug"
             self.original_view.set_image(
                 numpy_to_qimage(display_image),
@@ -3841,6 +3869,13 @@ class MainWindow(QMainWindow):
             )
             if not keep_view:
                 self.original_view.fit_image()
+            if parallel_image is not None:
+                self.image_view.set_image(
+                    numpy_to_qimage(parallel_image),
+                    clear_roi=True,
+                    keep_view=keep_view,
+                )
+                self._sync_views_from(self.original_view)
             self._sync_display_mode_buttons(mode)
             self.set_measure_mode(False)
             return
@@ -3910,7 +3945,10 @@ class MainWindow(QMainWindow):
         self.set_measure_mode(self._measure_mode)
 
     def _sync_views_from(self, source: ImageView) -> None:
-        if self._display_mode != "parallel" or self._syncing_views:
+        parallel = self._display_mode == "parallel" or (
+            self._display_mode == "debug" and self._debug_stage == "parallel"
+        )
+        if not parallel or self._syncing_views:
             return
         target = self.image_view if source is self.original_view else self.original_view
         if not source.isVisible() or not target.isVisible():
@@ -3924,7 +3962,9 @@ class MainWindow(QMainWindow):
             self.original_view.fit_image()
         if self.image_view.isVisible():
             self.image_view.fit_image()
-        if self._display_mode == "parallel":
+        if self._display_mode == "parallel" or (
+            self._display_mode == "debug" and self._debug_stage == "parallel"
+        ):
             self._sync_views_from(self.original_view)
 
     def _on_roi_changed(self, x: int, y: int, width: int, height: int) -> None:
