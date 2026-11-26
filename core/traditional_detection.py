@@ -1676,6 +1676,22 @@ def _run_20um(
     cmos_regions: list[tuple[str, Rect]] = []
     offset_detected = False
     cmos_top_line: int | None = None
+    if run_cmos:
+        cap_top = int(split.get("capTopOffset", 200))
+        cmos_top_line = cap_top
+        first = find_first_pad(
+            down_crop,
+            thresh=int(split.get("padGrayThresh", 210)),
+            pad_min_num=int(split.get("padMinNum", 6)),
+            pad_w=int(split.get("padW", 36)),
+            pad_h=int(split.get("padH", 36)),
+            pad_range=int(split.get("padRange", 10)),
+            search_width=int(split.get("padSearchRange", 200)),
+        )
+        if first is not None:
+            estimated = first[1] - int(detection.get("padTopToCmosEdgePix", 190))
+            if abs(estimated - cap_top) <= 120:
+                cmos_top_line = estimated
     if run_cap:
         if pad_centers is None:
             _log(messages, callback, "20um：单上图缺少下图 Pad 位置，跳过 CAP 偏移检测")
@@ -1683,22 +1699,7 @@ def _run_20um(
             _log(messages, callback, "20um：执行 CAP 偏移检测")
             _check_cancelled(cancel_callback)
             left_pad, right_pad = pad_centers
-            cap_top = int(split.get("capTopOffset", 200))
-            first = find_first_pad(
-                down_crop,
-                thresh=int(split.get("padGrayThresh", 210)),
-                pad_min_num=int(split.get("padMinNum", 6)),
-                pad_w=int(split.get("padW", 36)),
-                pad_h=int(split.get("padH", 36)),
-                pad_range=int(split.get("padRange", 10)),
-                search_width=int(split.get("padSearchRange", 200)),
-            )
-            cmos_top = cap_top
-            if first is not None:
-                estimated = first[1] - int(detection.get("padTopToCmosEdgePix", 190))
-                if abs(estimated - cap_top) <= 120:
-                    cmos_top = estimated
-            cmos_top_line = cmos_top
+            cmos_top = cmos_top_line
             allowed_x = left_pad + int(detection.get("capLeftOffsetThreshPix", 260))
             allowed_y = max(
                 0,
@@ -1781,6 +1782,9 @@ def _run_20um(
         gray_cmos = cv2.cvtColor(cmos_crop, cv2.COLOR_BGR2GRAY)
         cmos_binary = cv2.threshold(gray_cmos, int(detection.get("cmosDetectGrayThresh", 100)), 255, cv2.THRESH_BINARY_INV)[1]
         safe = _clamp((int(detection.get("cmosSafeX", 0)), int(detection.get("cmosSafeY", 0)), int(detection.get("cmosSafeW", cmos_crop.shape[1])), int(detection.get("cmosSafeH", cmos_crop.shape[0]))), cmos_crop.shape)
+        top = max(0, min(cmos_crop.shape[0], cmos_top_line - cmos_offset))
+        safe = _intersection(safe, (0, top, cmos_crop.shape[1], cmos_crop.shape[0] - top))
+        _log(messages, callback, f"20um：CMOS 上边界 y={cmos_top_line}，屏蔽上方区域")
         cmos_regions.append(("CMOS 安全区", (safe[0], safe[1] + cmos_offset, safe[2], safe[3])))
         mask = np.zeros_like(cmos_binary)
         sx, sy, sw, sh = safe

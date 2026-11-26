@@ -159,6 +159,9 @@ class MainWindow(QMainWindow):
         self._detection_output_index = -1
         self._single_detection_file_name: str | None = None
         self._single_detection_layer_name: str | None = None
+        self._stitched_pair_results: dict[int, int] = {}
+        self._next_stitched_pair_id = 1
+        self._running_stitched_pairs: list[int] = []
         self._crop_folder_paths: list[Path] = []
         self._crop_folder_index = -1
         self._detection_all = False
@@ -347,6 +350,37 @@ class MainWindow(QMainWindow):
         self.debug_stage_widget.setVisible(False)
         image_panel_layout.addWidget(self.debug_stage_widget)
 
+        self.stitched_pair_group = QGroupBox("上下层拼接图对")
+        pair_layout = QVBoxLayout(self.stitched_pair_group)
+        pair_actions = QHBoxLayout()
+        self.add_stitched_pair_button = QPushButton("添加一组")
+        self.add_stitched_pairs_button = QPushButton("批量添加")
+        self.remove_stitched_pair_button = QPushButton("移除选中组")
+        self.run_stitched_pair_button = QPushButton("运行选中组")
+        self.run_stitched_pairs_button = QPushButton("运行全部")
+        for button, callback in (
+            (self.add_stitched_pair_button, self.select_stitched_pair),
+            (self.add_stitched_pairs_button, self.select_stitched_pairs),
+            (self.remove_stitched_pair_button, self.remove_stitched_pair),
+            (self.run_stitched_pair_button, lambda: self.run_traditional_detection()),
+            (self.run_stitched_pairs_button, self._handle_detect_all_clicked),
+        ):
+            button.clicked.connect(callback)
+            pair_actions.addWidget(button)
+        pair_layout.addLayout(pair_actions)
+        self.stitched_pair_table = QTableWidget(0, 4)
+        self.stitched_pair_table.setHorizontalHeaderLabels(["组名", "上层拼接图", "下层拼接图", "状态"])
+        self.stitched_pair_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.stitched_pair_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.stitched_pair_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.stitched_pair_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.stitched_pair_table.setMinimumHeight(110)
+        self.stitched_pair_table.setMaximumHeight(180)
+        self.stitched_pair_table.itemSelectionChanged.connect(self._on_stitched_pair_selected)
+        pair_layout.addWidget(self.stitched_pair_table)
+        self.stitched_pair_group.setVisible(False)
+        image_panel_layout.addWidget(self.stitched_pair_group)
+
         image_layout = QHBoxLayout()
         image_layout.setContentsMargins(0, 0, 0, 0)
         image_layout.setSpacing(8)
@@ -496,6 +530,13 @@ class MainWindow(QMainWindow):
         image_source_layout = QVBoxLayout(image_source_group)
         image_source_layout.setContentsMargins(4, 8, 4, 2)
         image_source_layout.setSpacing(6)
+
+        self.twenty_um_input_combo = QComboBox()
+        self.twenty_um_input_combo.addItem("小图组／已裁剪图", "existing")
+        self.twenty_um_input_combo.addItem("上下层拼接图对", "stitched_pairs")
+        self.twenty_um_input_combo.setVisible(self._resolution_mode == "20um")
+        self.twenty_um_input_combo.currentIndexChanged.connect(self._on_twenty_um_input_changed)
+        image_source_layout.addWidget(self.twenty_um_input_combo)
 
         self.folder_edit = QLineEdit()
         self.folder_edit.setPlaceholderText("小图文件夹路径")
@@ -2216,6 +2257,7 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "自动裁剪失败", message)
 
     def _update_detection_button(self) -> None:
+        stitched_mode = self._uses_stitched_pairs()
         pair_selected = bool(
             self.cropped_up_edit.text().strip()
             or self.cropped_down_edit.text().strip()
@@ -2249,6 +2291,9 @@ class MainWindow(QMainWindow):
             else bool(self.crop_folder_edit.text().strip())
             and os.path.isdir(self.crop_folder_edit.text().strip())
         )
+        if stitched_mode:
+            has_single_input = self.stitched_pair_table.currentRow() >= 0
+            has_batch_input = self.stitched_pair_table.rowCount() > 0
         detection_running = (
             self._detection_thread is not None
             and self._detection_thread.isRunning()
@@ -2268,6 +2313,21 @@ class MainWindow(QMainWindow):
             )
         )
         self.run_detection_button.setEnabled(ready and has_single_input)
+        self.run_stitched_pair_button.setEnabled(ready and stitched_mode and has_single_input)
+        pair_editable = not detection_running and not region_crop_running and not (
+            self._crop_thread is not None and self._crop_thread.isRunning()
+        )
+        self.twenty_um_input_combo.setEnabled(pair_editable)
+        resolution_enabled = pair_editable and not (
+            self._stitch_thread is not None and self._stitch_thread.isRunning()
+        )
+        for button in (self.mode_switch, self.mode_20um_button, self.mode_5um_button):
+            button.setEnabled(resolution_enabled)
+        for button in (self.add_stitched_pair_button, self.add_stitched_pairs_button):
+            button.setEnabled(pair_editable)
+        self.remove_stitched_pair_button.setEnabled(
+            pair_editable and self.stitched_pair_table.currentRow() >= 0
+        )
         if region_crop_running:
             active_button = (
                 self.batch_configured_region_crop_button
@@ -2305,6 +2365,10 @@ class MainWindow(QMainWindow):
                 "批量检测" if self._resolution_mode == "5um" else "全部检测"
             )
             self.run_detection_all_button.setEnabled(ready and has_batch_input)
+        self.run_stitched_pairs_button.setText(self.run_detection_all_button.text() if detection_running else "运行全部")
+        self.run_stitched_pairs_button.setEnabled(
+            self.run_detection_all_button.isEnabled() and stitched_mode
+        )
 
     def _handle_detect_all_clicked(self, _checked: bool = False) -> None:
         if (
@@ -2321,12 +2385,28 @@ class MainWindow(QMainWindow):
         self.run_traditional_detection(detect_all=True)
 
     def run_traditional_detection(self, *, detect_all: bool = False) -> None:
+        if self._detection_thread is not None and self._detection_thread.isRunning():
+            return
         index = self.wafer_recipe_combo.currentIndex()
         crop_pair: tuple[str | None, str | None] | None = None
+        stitched_pairs: list[tuple[int, str, str]] | None = None
         if self._resolution_mode == "20um":
             up_path = self.cropped_up_edit.text().strip()
             down_path = self.cropped_down_edit.text().strip()
-            if up_path or down_path:
+            if self._uses_stitched_pairs():
+                rows = list(range(self.stitched_pair_table.rowCount())) if detect_all else [self.stitched_pair_table.currentRow()]
+                if not rows or rows[0] < 0:
+                    QMessageBox.warning(self, "提示", "请先添加并选择一组上下层拼接图。")
+                    return
+                stitched_pairs = [
+                    (
+                        self.stitched_pair_table.item(row, 0).data(Qt.ItemDataRole.UserRole),
+                        self.stitched_pair_table.item(row, 1).data(Qt.ItemDataRole.UserRole),
+                        self.stitched_pair_table.item(row, 2).data(Qt.ItemDataRole.UserRole),
+                    )
+                    for row in rows
+                ]
+            elif up_path or down_path:
                 if detect_all:
                     QMessageBox.warning(self, "提示", "已裁剪图只支持检测单张。")
                     return
@@ -2405,7 +2485,9 @@ class MainWindow(QMainWindow):
                 else "20um CMOS 下图检测" if crop_pair[0] is None
                 else "20um 上下图检测"
             )
-        self._detection_all = detect_all
+        if stitched_pairs is not None:
+            detection_name = "20um 拼接图对检测"
+        self._detection_all = detect_all or stitched_pairs is not None
         self._detection_stop_requested = False
         self.run_detection_button.setEnabled(False)
         self.run_detection_all_button.setEnabled(False)
@@ -2414,7 +2496,12 @@ class MainWindow(QMainWindow):
         self.load_wafer_recipes_button.setEnabled(False)
         self.import_wafer_recipes_button.setEnabled(False)
         self.detection_result_edit.setPlainText(f"{detection_name}运行中")
-        self._clear_detection_outputs()
+        if stitched_pairs is None:
+            self._clear_detection_outputs()
+        self._running_stitched_pairs = [] if stitched_pairs is None else [pair[0] for pair in stitched_pairs]
+        for pair_id in self._running_stitched_pairs:
+            self._stitched_pair_results.pop(pair_id, None)
+            self._set_stitched_pair_status(pair_id, "等待运行")
         self._set_status(
             f"开始运行 {detection_name}，配方：{recipe.recipe_name}"
         )
@@ -2447,6 +2534,7 @@ class MainWindow(QMainWindow):
             self.machine_combo.currentText(),
             detect_all,
             crop_pair,
+            stitched_pairs=stitched_pairs,
         )
         self._detection_worker.moveToThread(self._detection_thread)
         self._detection_thread.started.connect(self._detection_worker.run)
@@ -2463,6 +2551,9 @@ class MainWindow(QMainWindow):
         )
         self._detection_worker.stopped.connect(self._on_detection_stopped)
         self._detection_worker.failed.connect(self._on_detection_failed)
+        self._detection_worker.pair_started.connect(self._on_stitched_pair_started)
+        self._detection_worker.pair_finished.connect(self._on_stitched_pair_finished)
+        self._detection_worker.pair_failed.connect(self._on_stitched_pair_failed)
         self._detection_worker.finished.connect(self._detection_thread.quit)
         self._detection_worker.all_finished.connect(self._detection_thread.quit)
         self._detection_worker.stopped.connect(self._detection_thread.quit)
@@ -2472,6 +2563,11 @@ class MainWindow(QMainWindow):
         self._update_detection_button()
 
     def _cleanup_detection_thread(self) -> None:
+        for pair_id in self._running_stitched_pairs:
+            row = self._stitched_pair_row(pair_id)
+            if row >= 0 and self.stitched_pair_table.item(row, 3).text() in {"等待运行", "运行中"}:
+                self._set_stitched_pair_status(pair_id, "已停止")
+        self._running_stitched_pairs.clear()
         if self._detection_worker is not None:
             self._detection_worker.deleteLater()
             self._detection_worker = None
@@ -2701,6 +2797,9 @@ class MainWindow(QMainWindow):
         )
 
     def _clear_detection_outputs(self) -> None:
+        self._stitched_pair_results.clear()
+        for row in range(self.stitched_pair_table.rowCount()):
+            self.stitched_pair_table.item(row, 3).setText("未运行")
         self._detection_outputs.clear()
         self._detection_cache_paths.clear()
         if self._detection_cache_dir is not None:
@@ -2784,6 +2883,159 @@ class MainWindow(QMainWindow):
             return
         super().keyReleaseEvent(event)
 
+    def _uses_stitched_pairs(self) -> bool:
+        return (
+            self._resolution_mode == "20um"
+            and self.twenty_um_input_combo.currentData() == "stitched_pairs"
+        )
+
+    def _on_twenty_um_input_changed(self, _index: int) -> None:
+        self.stitched_pair_group.setVisible(self._uses_stitched_pairs())
+        self._update_detection_button()
+
+    def _stitched_pair_row(self, pair_id: int) -> int:
+        for row in range(self.stitched_pair_table.rowCount()):
+            if self.stitched_pair_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == pair_id:
+                return row
+        return -1
+
+    def _set_stitched_pair_status(self, pair_id: int, text: str) -> None:
+        row = self._stitched_pair_row(pair_id)
+        if row >= 0:
+            item = self.stitched_pair_table.item(row, 3)
+            item.setText(text)
+            item.setToolTip(text)
+
+    def _add_stitched_pair(self, up_path: str, down_path: str) -> None:
+        pair_id = self._next_stitched_pair_id
+        self._next_stitched_pair_id += 1
+        row = self.stitched_pair_table.rowCount()
+        self.stitched_pair_table.blockSignals(True)
+        self.stitched_pair_table.insertRow(row)
+        for column, text, value in (
+            (0, f"第 {pair_id} 组", pair_id),
+            (1, Path(up_path).name, up_path),
+            (2, Path(down_path).name, down_path),
+            (3, "未运行", None),
+        ):
+            item = QTableWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, value)
+            item.setToolTip(str(value) if column in {1, 2} else text)
+            self.stitched_pair_table.setItem(row, column, item)
+        self.stitched_pair_table.blockSignals(False)
+        self.stitched_pair_table.selectRow(row)
+        self._append_log(f"已添加拼接图对 {pair_id}：上图 {up_path}，下图 {down_path}")
+
+    def select_stitched_pair(self) -> None:
+        last_dir = self._settings.value("last_stitched_pair_dir", "", type=str)
+        file_filter = "图片文件 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)"
+        up_path, _ = QFileDialog.getOpenFileName(self, "选择上层拼接图", last_dir, file_filter)
+        if not up_path:
+            return
+        down_path, _ = QFileDialog.getOpenFileName(
+            self, "选择下层拼接图", str(Path(up_path).parent), file_filter
+        )
+        if not down_path:
+            return
+        if Path(up_path).resolve() == Path(down_path).resolve():
+            QMessageBox.warning(self, "提示", "上下层不能选择同一张图片。")
+            return
+        self._settings.setValue("last_stitched_pair_dir", str(Path(up_path).parent))
+        self._add_stitched_pair(up_path, down_path)
+
+    def select_stitched_pairs(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "选择拼接图文件夹：按 _up、_down 后缀配对",
+            self._settings.value("last_stitched_pair_dir", "", type=str),
+        )
+        if not folder:
+            return
+        try:
+            paths = [
+                path for path in Path(folder).iterdir()
+                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+            ]
+        except OSError as exc:
+            QMessageBox.warning(self, "读取文件夹失败", str(exc))
+            return
+        if not paths:
+            QMessageBox.warning(self, "提示", "所选文件夹中没有可配对的图片。")
+            return
+        groups: dict[tuple[Path, str], dict[str, Path]] = {}
+        errors: list[str] = []
+        for value in paths:
+            path = Path(value)
+            prefix, separator, layer = path.stem.rpartition("_")
+            layer = layer.lower()
+            if not separator or not prefix or layer not in {"up", "down"}:
+                errors.append(f"文件名需以 _up 或 _down 结尾：{path.name}")
+                continue
+            key = (path.resolve().parent, prefix.lower())
+            group = groups.setdefault(key, {})
+            if layer in group:
+                errors.append(f"同组 {layer} 图片重复：{group[layer].name}、{path.name}")
+            else:
+                group[layer] = path
+        for group in groups.values():
+            if "up" not in group or "down" not in group:
+                path = next(iter(group.values()))
+                missing = "上图 _up" if "up" not in group else "下图 _down"
+                errors.append(f"{path.name} 缺少配对的{missing}")
+        if errors:
+            QMessageBox.warning(self, "无法配对", "本次未添加图片：\n" + "\n".join(errors))
+            return
+        ordered = sorted(groups.values(), key=lambda group: natural_sort_key(group["up"]))
+        self._settings.setValue("last_stitched_pair_dir", str(ordered[0]["up"].parent))
+        for group in ordered:
+            self._add_stitched_pair(str(group["up"]), str(group["down"]))
+        self._set_status(f"已按 _up、_down 后缀添加 {len(ordered)} 组拼接图")
+
+    def remove_stitched_pair(self) -> None:
+        if self._detection_thread is not None and self._detection_thread.isRunning():
+            return
+        row = self.stitched_pair_table.currentRow()
+        if row < 0:
+            return
+        pair_id = self.stitched_pair_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        self._stitched_pair_results.pop(pair_id, None)
+        self.stitched_pair_table.removeRow(row)
+        self._append_log(f"已从列表移除拼接图对 {pair_id}")
+        self._update_detection_button()
+
+    def _on_stitched_pair_selected(self) -> None:
+        row = self.stitched_pair_table.currentRow()
+        if row >= 0:
+            pair_id = self.stitched_pair_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            output_index = self._stitched_pair_results.get(pair_id)
+            if output_index is not None:
+                self._show_detection_output_at(output_index)
+        self._update_detection_button()
+
+    def _on_stitched_pair_started(self, pair_id: int) -> None:
+        self._set_stitched_pair_status(pair_id, "运行中")
+
+    def _on_stitched_pair_finished(self, output: object, pair_id: int) -> None:
+        if not isinstance(output, DetectionOutput):
+            self._on_stitched_pair_failed(pair_id, "检测返回结果类型错误。")
+            return
+        output_index = len(self._detection_outputs)
+        self._show_detection_output(output, f"20um 拼接图对：第 {pair_id} 组")
+        if len(self._detection_outputs) != output_index + 1:
+            self._on_stitched_pair_failed(pair_id, "无法缓存检测结果。")
+            return
+        self._stitched_pair_results[pair_id] = output_index
+        self._set_stitched_pair_status(pair_id, f"完成，{len(output.items)} 个缺陷")
+        row = self._stitched_pair_row(pair_id)
+        if row >= 0:
+            self.stitched_pair_table.blockSignals(True)
+            self.stitched_pair_table.selectRow(row)
+            self.stitched_pair_table.blockSignals(False)
+
+    def _on_stitched_pair_failed(self, pair_id: int, message: str) -> None:
+        self._set_stitched_pair_status(pair_id, f"失败：{message}")
+        self._append_log(f"拼接图对 {pair_id} 检测失败：{message}")
+
     def select_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
             self,
@@ -2791,6 +3043,7 @@ class MainWindow(QMainWindow):
             self.folder_edit.text() or self._settings.value("last_folder", "", type=str),
         )
         if folder:
+            self.twenty_um_input_combo.setCurrentIndex(0)
             self.folder_edit.setText(folder)
             self.cropped_up_edit.clear()
             self.cropped_down_edit.clear()
@@ -2810,6 +3063,7 @@ class MainWindow(QMainWindow):
         )
         if not file_path:
             return
+        self.twenty_um_input_combo.setCurrentIndex(0)
         image = imread_unicode(file_path)
         if image is None:
             QMessageBox.critical(self, "加载失败", f"无法读取图片：\n{file_path}")
@@ -3313,6 +3567,8 @@ class MainWindow(QMainWindow):
             self._set_status("请先停止盲元电路区裁剪，再切换分辨率")
             return
         self._resolution_mode = target_mode
+        self.twenty_um_input_combo.setVisible(target_mode == "20um")
+        self.stitched_pair_group.setVisible(self._uses_stitched_pairs())
         self._auto_crop_output = None
         self._settings.setValue("last_resolution_mode", target_mode)
         self._sync_mode_switch()

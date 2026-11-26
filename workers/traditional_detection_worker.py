@@ -25,6 +25,9 @@ class TraditionalDetectionWorker(QObject):
     all_finished = Signal(int, int)
     stopped = Signal(int)
     failed = Signal(str)
+    pair_started = Signal(int)
+    pair_finished = Signal(object, int)
+    pair_failed = Signal(int, str)
 
     def __init__(
         self,
@@ -37,6 +40,7 @@ class TraditionalDetectionWorker(QObject):
         machine_id: str = "",
         detect_all: bool = False,
         crop_pair: tuple[str | None, str | None] | None = None,
+        stitched_pairs: list[tuple[int, str, str]] | None = None,
     ) -> None:
         super().__init__()
         self._image = None if image is None else image.copy()
@@ -48,6 +52,7 @@ class TraditionalDetectionWorker(QObject):
         self._machine_id = machine_id
         self._detect_all = detect_all
         self._crop_pair = crop_pair
+        self._stitched_pairs = list(stitched_pairs) if stitched_pairs is not None else None
         self._stop_event = Event()
 
     def request_stop(self) -> None:
@@ -59,6 +64,40 @@ class TraditionalDetectionWorker(QObject):
             image = self._image
             up_image = self._up_image
             if self._resolution_mode == "20um":
+                if self._stitched_pairs is not None:
+                    for pair_id, up_path, down_path in self._stitched_pairs:
+                        if self._stop_event.is_set():
+                            self.stopped.emit(completed_count)
+                            return
+                        self.pair_started.emit(pair_id)
+                        try:
+                            up_image = imread_unicode(up_path)
+                            image = imread_unicode(down_path)
+                            if up_image is None or image is None:
+                                raise ValueError("无法读取拼接图对，请检查上下图路径。")
+                            if up_image.shape != image.shape:
+                                raise ValueError("上下层拼接图的尺寸及通道数必须一致。")
+                            self.log.emit(f"20um：拼接图对 {pair_id}，上图 {up_path}，下图 {down_path}")
+                            output = run_traditional_detection(
+                                image,
+                                self._resolution_mode,
+                                self._params,
+                                up_image=up_image,
+                                log_callback=self.log.emit,
+                                cancel_callback=self._stop_event.is_set,
+                            )
+                        except (DetectionCancelled, InterruptedError):
+                            raise
+                        except Exception as exc:
+                            self.pair_failed.emit(pair_id, str(exc))
+                            continue
+                        completed_count += 1
+                        self.pair_finished.emit(output, pair_id)
+                    if self._stop_event.is_set():
+                        self.stopped.emit(completed_count)
+                    else:
+                        self.all_finished.emit(completed_count, 0)
+                    return
                 if self._crop_pair is not None:
                     up_path, down_path = self._crop_pair
                     if not up_path and not down_path:
