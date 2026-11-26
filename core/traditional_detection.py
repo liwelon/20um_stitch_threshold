@@ -52,6 +52,7 @@ class DetectionOutput:
     regions: list[tuple[str, Rect]] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     source_image: np.ndarray | None = None
+    debug_images: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass
@@ -1571,6 +1572,7 @@ def _run_20um(
     split = _section(params, "splitParams", "SplitParams")
     detection = _section(params, "detectParams", "DetectParams")
     messages: list[str] = []
+    debug_images: dict[str, np.ndarray] = {}
     if cropped_layer == "up":
         up_crop = image.copy()
         down_crop = image
@@ -1736,8 +1738,10 @@ def _run_20um(
         canny1 = int(detection.get("imagingCannyThresh1", 20))
         canny2 = int(detection.get("imagingCannyThresh2", 100))
         binary = cv2.bitwise_or(cv2.Canny(gray_cap, canny1, canny2), cv2.threshold(gray_cap, int(detection.get("capGrayThresh", 100)), 255, cv2.THRESH_BINARY_INV)[1])
+        debug_images["cap_union"] = binary.copy()
         kernel_size = max(1, int(detection.get("imagingCannyK", 5)))
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((kernel_size, kernel_size), np.uint8))
+        debug_images["cap_closed"] = binary.copy()
         top_offset = int(split.get("capTopOffset", 200))
         imaging_left = int(int(detection.get("imagingLeft", 0)) / 2.5)
         imaging_top = int(int(detection.get("imagingTop", 0)) / 2.5) + top_offset
@@ -1799,6 +1803,7 @@ def _run_20um(
         cmos_shrink = int(detection.get("cmosChipShrinkPix", 0))
         inner_safe = (sx + cmos_shrink, sy + cmos_shrink, sw - cmos_shrink * 2, sh - cmos_shrink * 2)
         chip_min = int(float(detection.get("cmosChipMinLengthUm", 0.0)) / 2.5)
+        chip_max = int(float(detection.get("cmosChipMaxLengthUm", 0.0)) / 2.5)
         dirty_min = int(detection.get("cmosDirtyMinWidthPix", 0))
         for contour in contours:
             _check_cancelled(cancel_callback)
@@ -1807,8 +1812,9 @@ def _run_20um(
             if inter[2] <= 0 or inter[3] <= 0:
                 continue
             mapped_box = (box[0], box[1] + cmos_offset, box[2], box[3])
-            if inter[2] * inter[3] != box[2] * box[3] and min(box[2], box[3]) > chip_min:
-                cmos_items.append(DetectionItem("cmos_chip", mapped_box, float(box[2] * box[3]), "CMOS 崩边"))
+            if inter[2] * inter[3] != box[2] * box[3]:
+                if max(box[2], box[3]) > chip_max and min(box[2], box[3]) > chip_min:
+                    cmos_items.append(DetectionItem("cmos_chip", mapped_box, float(box[2] * box[3]), "CMOS 崩边"))
             elif min(box[2], box[3]) > dirty_min:
                 cmos_items.append(DetectionItem("cmos_dirty", mapped_box, float(box[2] * box[3]), "CMOS 脏污"))
     _log(messages, callback, f"20um：上图 CAP 缺陷 {len(cap_items)} 个，下图 CMOS 缺陷 {len(cmos_items)} 个")
@@ -1848,6 +1854,7 @@ def _run_20um(
         regions,
         messages,
         source_image=source_image,
+        debug_images=debug_images,
     )
 
 

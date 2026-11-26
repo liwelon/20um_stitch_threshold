@@ -154,7 +154,7 @@ class MainWindow(QMainWindow):
         self._detection_output: DetectionOutput | None = None
         self._detection_outputs: list[tuple[DetectionOutput, str]] = []
         self._detection_cache_dir: QTemporaryDir | None = None
-        self._detection_cache_paths: list[tuple[Path, Path] | None] = []
+        self._detection_cache_paths: list[tuple[Path, Path, dict[str, Path]] | None] = []
         self._detection_output_index = -1
         self._single_detection_file_name: str | None = None
         self._single_detection_layer_name: str | None = None
@@ -283,6 +283,9 @@ class MainWindow(QMainWindow):
         self.mode_crop_btn = QPushButton("裁剪图")
         self.mode_detection_btn = QPushButton("检测结果")
         self.mode_detection_btn.setEnabled(False)
+        self.mode_debug_btn = QPushButton("调试图")
+        self.mode_debug_btn.setEnabled(False)
+        self.mode_debug_btn.setToolTip("20um CAP 检测完成后查看并集图和闭运算后图")
         self.mode_group = QButtonGroup(self)
         self.mode_group.setExclusive(True)
         for button, mode in (
@@ -291,6 +294,7 @@ class MainWindow(QMainWindow):
             (self.mode_parallel_btn, "parallel"),
             (self.mode_crop_btn, "crop"),
             (self.mode_detection_btn, "detection"),
+            (self.mode_debug_btn, "debug"),
         ):
             button.setCheckable(True)
             self.mode_group.addButton(button)
@@ -314,6 +318,20 @@ class MainWindow(QMainWindow):
         display_row.addWidget(self.next_detection_button)
         display_row.addStretch()
         image_panel_layout.addLayout(display_row)
+
+        self.debug_stage_widget = QWidget()
+        debug_stage_row = QHBoxLayout(self.debug_stage_widget)
+        debug_stage_row.setContentsMargins(0, 0, 0, 0)
+        debug_stage_row.addWidget(QLabel("CAP 调试阶段"))
+        self.debug_stage_combo = QComboBox()
+        self.debug_stage_combo.addItem("二值化与边缘并集", "cap_union")
+        self.debug_stage_combo.addItem("闭运算后", "cap_closed")
+        self.debug_stage_combo.setEnabled(False)
+        self.debug_stage_combo.currentIndexChanged.connect(self._on_debug_stage_changed)
+        debug_stage_row.addWidget(self.debug_stage_combo)
+        debug_stage_row.addStretch()
+        self.debug_stage_widget.setVisible(False)
+        image_panel_layout.addWidget(self.debug_stage_widget)
 
         image_layout = QHBoxLayout()
         image_layout.setContentsMargins(0, 0, 0, 0)
@@ -2532,10 +2550,18 @@ class MainWindow(QMainWindow):
             cache_index = len(self._detection_outputs)
             source_path = cache_dir / f"{cache_index}_source.png"
             result_path = cache_dir / f"{cache_index}_result.png"
+            debug_paths = {
+                name: cache_dir / f"{cache_index}_debug_{name}.png"
+                for name in output.debug_images
+            }
             try:
                 saved = (
                     imwrite_unicode(str(source_path), output.source_image)
                     and imwrite_unicode(str(result_path), output.image)
+                    and all(
+                        imwrite_unicode(str(debug_paths[name]), image)
+                        for name, image in output.debug_images.items()
+                    )
                 )
             except OSError:
                 saved = False
@@ -2544,9 +2570,10 @@ class MainWindow(QMainWindow):
                     self._detection_worker.request_stop()
                 self._on_detection_failed("无法保存检测结果临时文件。")
                 return
-            cache_paths = (source_path, result_path)
+            cache_paths = (source_path, result_path, debug_paths)
             output.source_image = None
             output.image = np.empty((0, 0), dtype=np.uint8)
+            output.debug_images.clear()
         self._detection_outputs.append((output, layer_name))
         self._detection_cache_paths.append(cache_paths)
         self._show_detection_output_at(
@@ -2559,30 +2586,45 @@ class MainWindow(QMainWindow):
         output_index: int,
         *,
         activate: bool = True,
+        display_mode: str | None = None,
     ) -> None:
         if not 0 <= output_index < len(self._detection_outputs):
             return
-        showing_detection = self._display_mode == "detection"
+        showing_detection = self._display_mode in {"detection", "debug"}
+        target_mode = display_mode or ("debug" if self._display_mode == "debug" else "detection")
         output, layer_name = self._detection_outputs[output_index]
         cache_paths = self._detection_cache_paths[output_index]
         if cache_paths is not None and output.image.size == 0:
             try:
                 source_image = imread_unicode(str(cache_paths[0]))
                 result_image = imread_unicode(str(cache_paths[1]))
+                debug_images = {
+                    name: imread_unicode(str(path))
+                    for name, path in cache_paths[2].items()
+                }
             except OSError:
                 source_image = None
                 result_image = None
-            if source_image is None or result_image is None:
+                debug_images = {}
+            if (
+                source_image is None or result_image is None
+                or any(image is None for image in debug_images.values())
+            ):
                 self._on_detection_failed("无法读取检测结果临时文件。")
                 return
             output.source_image = source_image
             output.image = result_image
+            output.debug_images = {
+                name: cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                for name, image in debug_images.items()
+            }
         previous_index = self._detection_output_index
         if previous_index != output_index and 0 <= previous_index < len(self._detection_outputs):
             if self._detection_cache_paths[previous_index] is not None:
                 previous_output = self._detection_outputs[previous_index][0]
                 previous_output.source_image = None
                 previous_output.image = np.empty((0, 0), dtype=np.uint8)
+                previous_output.debug_images.clear()
         self._detection_output_index = output_index
         self._detection_output = output
         if output.source_image is not None:
@@ -2632,9 +2674,14 @@ class MainWindow(QMainWindow):
             )
         self.detection_result_edit.setPlainText("\n".join(lines))
         self.mode_detection_btn.setEnabled(True)
+        has_debug = self._resolution_mode == "20um" and bool(output.debug_images)
+        self.mode_debug_btn.setEnabled(has_debug)
+        self.debug_stage_combo.setEnabled(has_debug)
         self._update_detection_navigation_buttons()
         if activate or showing_detection:
-            self.set_display_mode("detection", force=True)
+            if target_mode == "debug" and not has_debug:
+                target_mode = "detection"
+            self.set_display_mode(target_mode, force=True)
         self._set_status(
             f"{layer_name} 检测完成，发现 {len(output.items)} 个缺陷"
         )
@@ -2648,8 +2695,10 @@ class MainWindow(QMainWindow):
         self._detection_output_index = -1
         self._detection_output = None
         self.mode_detection_btn.setEnabled(False)
+        self.mode_debug_btn.setEnabled(False)
+        self.debug_stage_combo.setEnabled(False)
         self._update_detection_navigation_buttons()
-        if self._display_mode == "detection":
+        if self._display_mode in {"detection", "debug"}:
             self.set_display_mode("original", force=True)
 
     def _update_detection_navigation_buttons(self) -> None:
@@ -2687,8 +2736,8 @@ class MainWindow(QMainWindow):
     def set_roi_draw_mode(self, enabled: bool) -> None:
         if enabled:
             self.set_measure_mode(False)
-        # 裁剪框只能画在原图上；二值图/裁剪图禁止绘制
-        if self._display_mode in {"binary", "crop"}:
+        # 二值图、裁剪图和调试图禁止绘制裁剪框。
+        if self._display_mode in {"binary", "crop", "debug"}:
             self.original_view.set_draw_mode(False)
             self.image_view.set_draw_mode(False)
             return
@@ -3227,6 +3276,8 @@ class MainWindow(QMainWindow):
         self.mode_parallel_btn.setChecked(mode == "parallel")
         self.mode_crop_btn.setChecked(mode == "crop")
         self.mode_detection_btn.setChecked(mode == "detection")
+        self.mode_debug_btn.setChecked(mode == "debug")
+        self.debug_stage_widget.setVisible(mode == "debug" and self._resolution_mode == "20um")
 
     def _sync_mode_switch(self) -> None:
         self.mode_switch.blockSignals(True)
@@ -3234,6 +3285,10 @@ class MainWindow(QMainWindow):
         self.mode_switch.blockSignals(False)
         self.mode_20um_button.setChecked(self._resolution_mode == "20um")
         self.mode_5um_button.setChecked(self._resolution_mode == "5um")
+        self.mode_debug_btn.setVisible(self._resolution_mode == "20um")
+        self.debug_stage_widget.setVisible(
+            self._resolution_mode == "20um" and self._display_mode == "debug"
+        )
 
     def set_resolution_mode(self, target_mode: str) -> None:
         if target_mode == self._resolution_mode:
@@ -3612,7 +3667,7 @@ class MainWindow(QMainWindow):
         self._roi_rect = None
         self._crop_image = None
         self._crop_gray = None
-        if self._display_mode in {"crop", "detection"}:
+        if self._display_mode in {"crop", "detection", "debug"}:
             self._display_mode = "original"
             self._sync_display_mode_buttons("original")
         if source_label and not source_label.startswith("拼接"):
@@ -3747,32 +3802,46 @@ class MainWindow(QMainWindow):
         gray_mean = float(np.mean(gray_image))
         self.gray_mean_label.setText(f"灰度均值：{gray_mean:.2f}")
 
+    def _on_debug_stage_changed(self, _index: int) -> None:
+        if self._display_mode == "debug":
+            self.set_display_mode("debug", force=True)
+
     def set_display_mode(self, mode: str, force: bool = False) -> None:
-        if mode not in {"original", "binary", "parallel", "crop", "detection"}:
+        if mode not in {"original", "binary", "parallel", "crop", "detection", "debug"}:
             return
         if not force and mode == self._display_mode:
             return
 
         previous = self._display_mode
-        if mode == "detection":
+        if mode in {"detection", "debug"}:
             if not force and 0 <= self._detection_output_index < len(self._detection_outputs):
-                self._show_detection_output_at(self._detection_output_index)
+                self._show_detection_output_at(self._detection_output_index, display_mode=mode)
                 return
             if self._detection_output is None:
                 self._sync_display_mode_buttons(previous)
                 return
-            self._display_mode = "detection"
+            display_image = self._detection_output.image
+            if mode == "debug":
+                display_image = self._detection_output.debug_images.get(self.debug_stage_combo.currentData())
+                if self._resolution_mode != "20um" or display_image is None:
+                    self._sync_display_mode_buttons(previous)
+                    self._set_status("当前检测结果没有 CAP 调试图")
+                    return
+            self._display_mode = mode
             self._update_recipe_overlay()
             self.original_view.setVisible(True)
             self.image_view.setVisible(False)
             self.original_view.set_roi_interactive(False)
             self.original_view.set_draw_mode(False)
+            keep_view = previous == "debug" and mode == "debug"
             self.original_view.set_image(
-                numpy_to_qimage(self._detection_output.image),
+                numpy_to_qimage(display_image),
                 clear_roi=True,
+                keep_view=keep_view,
             )
-            self.original_view.fit_image()
-            self._sync_display_mode_buttons("detection")
+            if not keep_view:
+                self.original_view.fit_image()
+            self._sync_display_mode_buttons(mode)
             self.set_measure_mode(False)
             return
         if mode == "crop":
